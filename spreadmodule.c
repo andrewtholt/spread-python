@@ -6,6 +6,7 @@
 
 /* Python wrapper module for the Spread toolkit: http://www.spread.org/ */
 
+#define PY_SSIZE_T_CLEAN
 #include "Python.h"
 #include "structmember.h"
 #include "sp.h"
@@ -31,7 +32,7 @@ from invoking Spread on that mailbox until the receive() returns.  But if
 the receive is waiting for a multicast from another thread, that's deadlock.
 
 Until Spread disconnection semantics are fixed, we can't win:  we either
-leave the Spread disconnection race unaddressed, or leave apps open to
+leave the Spread disconnection race unaddressed, or leave an app open to
 deadlock.  For now we choose the former.
 */
 #include "pythread.h"
@@ -44,7 +45,7 @@ deadlock.  For now we choose the former.
    make progress.
 */
 #define ACQUIRE_MBOX_LOCK(MBOX)					\
-	do {							\
+	do { 							\
 		Py_BEGIN_ALLOW_THREADS				\
 		PyThread_acquire_lock((MBOX)->spread_lock, 1);	\
 		Py_END_ALLOW_THREADS				\
@@ -99,15 +100,15 @@ typedef struct {
 	group_id gid;
 } GroupId;
 
-staticforward PyTypeObject Mailbox_Type;
-staticforward PyTypeObject RegularMsg_Type;
-staticforward PyTypeObject MembershipMsg_Type;
-staticforward PyTypeObject GroupId_Type;
+static PyTypeObject Mailbox_Type;
+static PyTypeObject RegularMsg_Type;
+static PyTypeObject MembershipMsg_Type;
+static PyTypeObject GroupId_Type;
 
-#define MailboxObject_Check(v)	((v)->ob_type == &Mailbox_Type)
-#define RegularMsg_Check(v)	((v)->ob_type == &RegularMsg_Type)
-#define MembershipMsg_Check(v)	((v)->ob_type == &MembershipMsg_Type)
-#define GroupId_Check(v)	((v)->ob_type == &GroupId_Type)
+#define MailboxObject_Check(v)	(Py_TYPE(v) == &Mailbox_Type)
+#define RegularMsg_Check(v)	(Py_TYPE(v) == &RegularMsg_Type)
+#define MembershipMsg_Check(v)	(Py_TYPE(v) == &MembershipMsg_Type)
+#define GroupId_Check(v)	(Py_TYPE(v) == &GroupId_Type)
 
 static PyObject *
 new_group_id(group_id gid)
@@ -133,7 +134,7 @@ group_id_repr(GroupId *v)
 	char buf[80];
 	sprintf(buf, "<group_id %08X:%08X:%08X>",
 		v->gid.id[0], v->gid.id[1], v->gid.id[2]);
-	return PyString_FromString(buf);
+	return PyUnicode_FromString(buf);
 }
 
 static PyObject *
@@ -159,8 +160,7 @@ group_id_richcompare(PyObject *v, PyObject *w, int op)
 static PyTypeObject GroupId_Type = {
 	/* The ob_type field must be initialized in the module init function
 	 * to be portable to Windows without using C++. */
-	PyObject_HEAD_INIT(NULL)
-	0,					/* ob_size */
+	PyVarObject_HEAD_INIT(NULL, 0)
 	"GroupId",				/* tp_name */
 	sizeof(GroupId),			/* tp_basicsize */
 	0,					/* tp_itemsize */
@@ -205,21 +205,22 @@ new_membership_msg(int type, PyObject *group, int num_members,
     self = PyObject_New(MembershipMsg, &MembershipMsg_Type);
     if (self == NULL)
         return NULL;
+    self->group = NULL;
+    self->group_id = NULL;
+    self->members = NULL;
+    self->extra = NULL;
+    self->changed_member = NULL;
     self->reason = type & CAUSED_BY_MASK; /* from sp.h defines */
     self->msg_subtype = type & (TRANSITION_MESS | REG_MEMB_MESS);
     Py_INCREF(group);
     self->group = group;
-    self->members = NULL;
-    self->extra = NULL;
-    self->group_id = NULL;
-    self->changed_member = NULL;
     self->members = PyTuple_New(num_members);
     if (self->members == NULL) {
         Py_DECREF(self);
         return NULL;
     }
     for (i = 0; i < num_members; ++i) {
-        PyObject *s = PyString_FromString(members[i]);
+        PyObject *s = PyUnicode_FromString(members[i]);
         if (!s) {
             Py_DECREF(self);
             return NULL;
@@ -253,7 +254,7 @@ new_membership_msg(int type, PyObject *group, int num_members,
 
 
     if (Is_reg_memb_mess(type) && (Is_caused_join_mess(type) || Is_caused_disconnect_mess(type) || Is_caused_leave_mess(type))) {
-        self->changed_member =  PyString_FromString(memb_info.changed_member);
+        self->changed_member =  PyUnicode_FromString(memb_info.changed_member);
         if (!self->changed_member) {
             Py_DECREF(self);
             return NULL;
@@ -290,7 +291,7 @@ new_membership_msg(int type, PyObject *group, int num_members,
 
         for (i = 0; i < num_extra_members; i++) {
             PyObject *s;
-            s = PyString_FromString(member_names[i]);
+            s = PyUnicode_FromString(member_names[i]);
             if (!s) {
                 Py_DECREF(self);
                 free(member_names);
@@ -316,32 +317,38 @@ membership_msg_dealloc(MembershipMsg *self)
 	PyObject_Del(self);
 }
 
-#define OFF(x) offsetof(MembershipMsg, x)
-
-static struct memberlist MembershipMsg_memberlist[] = {
-	{"reason",	T_INT,		OFF(reason)},
-	{"msg_subtype",	T_INT,		OFF(msg_subtype)},
-	{"group",	T_OBJECT,	OFF(group)},
-	{"group_id",	T_OBJECT,	OFF(group_id)},
-	{"members",	T_OBJECT,	OFF(members)},
-	{"extra",	T_OBJECT,	OFF(extra)},
-	{"changed_member",	T_OBJECT,	OFF(changed_member)},
-	{NULL}
-};
-
 #undef OFF
 
 static PyObject *
 membership_msg_getattr(MembershipMsg *self, char *name)
 {
-	return PyMember_Get((char *)self, MembershipMsg_memberlist, name);
+    PyObject *res = NULL;
+    if (strcmp(name, "reason") == 0) {
+        res = PyLong_FromLong(self->reason);
+    } else if (strcmp(name, "msg_subtype") == 0) {
+        res = PyLong_FromLong(self->msg_subtype);
+    } else if (strcmp(name, "group") == 0) {
+        res = self->group;
+    } else if (strcmp(name, "group_id") == 0) {
+        res = self->group_id;
+    } else if (strcmp(name, "members") == 0) {
+        res = self->members;
+    } else if (strcmp(name, "extra") == 0) {
+        res = self->extra;
+    } else if (strcmp(name, "changed_member") == 0) {
+        res = self->changed_member;
+    } else {
+        PyErr_SetString(PyExc_AttributeError, name);
+        return NULL;
+    }
+    Py_XINCREF(res);
+    return res;
 }
 
 static PyTypeObject MembershipMsg_Type = {
 	/* The ob_type field must be initialized in the module init function
 	 * to be portable to Windows without using C++. */
-	PyObject_HEAD_INIT(NULL)
-	0,					/* ob_size */
+	PyVarObject_HEAD_INIT(NULL, 0)
 	"MembershipMsg",			/* tp_name */
 	sizeof(MembershipMsg),			/* tp_basicsize */
 	0,					/* tp_itemsize */
@@ -355,6 +362,17 @@ static PyTypeObject MembershipMsg_Type = {
 	0,					/* tp_as_number */
 	0,					/* tp_as_sequence */
 	0,					/* tp_as_mapping */
+	0,					/* tp_hash */
+	0,					/* tp_call */
+	0,					/* tp_str */
+	0,					/* tp_getattro */
+	0,					/* tp_setattro */
+	0,					/* tp_as_buffer */
+	Py_TPFLAGS_DEFAULT,			/* tp_flags */
+	0,					/* tp_doc */
+	0,					/* tp_traverse */
+	0,					/* tp_clear */
+	0,					/* tp_richcompare */
 };
 
 static PyObject *
@@ -368,9 +386,9 @@ new_regular_msg(PyObject *sender, int num_groups,
 	self = PyObject_New(RegularMsg, &RegularMsg_Type);
 	if (self == NULL)
 		return NULL;
-
-	self->message = NULL;
 	self->sender = NULL;
+	self->groups = NULL;
+	self->message = NULL;
 	assert(num_groups >= 0);
 	self->groups = PyTuple_New(num_groups);
 	if (self->groups == NULL) {
@@ -378,7 +396,7 @@ new_regular_msg(PyObject *sender, int num_groups,
 		return NULL;
 	}
 	for (i = 0; i < num_groups; ++i) {
-		PyObject *s = PyString_FromString(groups[i]);
+		PyObject *s = PyUnicode_FromString(groups[i]);
 		if (!s) {
 			Py_DECREF(self);
 			return NULL;
@@ -406,12 +424,12 @@ regular_msg_dealloc(RegularMsg *self)
 
 #define OFF(x) offsetof(RegularMsg, x)
 
-static struct memberlist RegularMsg_memberlist[] = {
-	{"msg_type", T_INT,		OFF(msg_type)},
-	{"endian",   T_INT,		OFF(endian)},
-	{"sender",   T_OBJECT,		OFF(sender)},
-	{"groups",   T_OBJECT,		OFF(groups)},
-	{"message",  T_OBJECT,		OFF(message)},
+static struct PyMemberDef RegularMsg_memberlist[] = {
+	{"msg_type", T_INT,		OFF(msg_type), READONLY},
+	{"endian",   T_INT,		OFF(endian), READONLY},
+	{"sender",   T_OBJECT_EX,		OFF(sender), READONLY},
+	{"groups",   T_OBJECT_EX,		OFF(groups), READONLY},
+	{"message",  T_OBJECT_EX,		OFF(message), READONLY},
 	{NULL}
 };
 
@@ -420,14 +438,29 @@ static struct memberlist RegularMsg_memberlist[] = {
 static PyObject *
 regular_msg_getattr(RegularMsg *self, char *name)
 {
-	return PyMember_Get((char *)self, RegularMsg_memberlist, name);
+    PyObject *res = NULL;
+    if (strcmp(name, "msg_type") == 0) {
+        res = PyLong_FromLong(self->msg_type);
+    } else if (strcmp(name, "endian") == 0) {
+        res = PyLong_FromLong(self->endian);
+    } else if (strcmp(name, "sender") == 0) {
+        res = self->sender;
+    } else if (strcmp(name, "groups") == 0) {
+        res = self->groups;
+    } else if (strcmp(name, "message") == 0) {
+        res = self->message;
+    } else {
+        PyErr_SetString(PyExc_AttributeError, name);
+        return NULL;
+    }
+    Py_XINCREF(res);
+    return res;
 }
 
 static PyTypeObject RegularMsg_Type = {
 	/* The ob_type field must be initialized in the module init function
 	 * to be portable to Windows without using C++. */
-	PyObject_HEAD_INIT(NULL)
-	0,					/* ob_size */
+	PyVarObject_HEAD_INIT(NULL, 0)
 	"RegularMsg",				/* tp_name */
 	sizeof(RegularMsg),			/* tp_basicsize */
 	0,					/* tp_itemsize */
@@ -441,6 +474,17 @@ static PyTypeObject RegularMsg_Type = {
 	0,					/* tp_as_number */
 	0,					/* tp_as_sequence */
 	0,					/* tp_as_mapping */
+	0,					/* tp_hash */
+	0,					/* tp_call */
+	0,					/* tp_str */
+	0,					/* tp_getattro */
+	0,					/* tp_setattro */
+	0,					/* tp_as_buffer */
+	Py_TPFLAGS_DEFAULT,			/* tp_flags */
+	0,					/* tp_doc */
+	0,					/* tp_traverse */
+	0,					/* tp_clear */
+	0,					/* tp_richcompare */
 };
 
 static MailboxObject *
@@ -512,7 +556,7 @@ mailbox_fileno(MailboxObject *self, PyObject *args)
 		return NULL;
 	if (self->disconnected)
 		return err_disconnected("fileno");
-	return PyInt_FromLong(self->mbox);
+	return PyLong_FromLong(self->mbox);
 }
 
 static PyObject *
@@ -566,162 +610,98 @@ mailbox_leave(MailboxObject *self, PyObject *args)
 static PyObject *
 mailbox_receive(MailboxObject *self, PyObject *args)
 {
-	/* CAUTION:  initializing svc_type is critical.  It's not clear from
-	 * the docs, but this is an input as well as an output parameter.
-	 * We didn't initialize it before, and very rarely the DROP_RECV flag
-	 * would end up getting set in it.  That in turn has miserable
-	 * consequences, and consequences only visible if a buffer (data or
-	 * group) is too small for the msg being received (so it goes crazy
-	 * at the worst possible times).
-	 */
-	service svc_type;
-	int num_groups, endian, size;
-	int16 msg_type;
+    service svc_type;
+    int num_groups = 0, endian = 0, size = 0;
+    int16 msg_type;
+    char senderbuffer[MAX_GROUP_NAME];
+    char groupbuffer[DEFAULT_GROUPS_SIZE][MAX_GROUP_NAME];
+    int max_groups = DEFAULT_GROUPS_SIZE;
+    char (*groups)[MAX_GROUP_NAME] = groupbuffer;
+    PyObject *data_byte_array = PyByteArray_FromObject(PyBytes_FromStringAndSize(NULL, DEFAULT_BUFFER_SIZE));
+    if (data_byte_array == NULL) {
+        return NULL;
+    }
+    char* pbuffer = PyByteArray_AsString(data_byte_array);
+    int bufsize = DEFAULT_BUFFER_SIZE;
 
-	char senderbuffer[MAX_GROUP_NAME];
-	char groupbuffer[DEFAULT_GROUPS_SIZE][MAX_GROUP_NAME];
-	char databuffer[DEFAULT_BUFFER_SIZE];
+    if (!PyArg_ParseTuple(args, ":receive"))
+        return NULL;
 
-	int max_groups = DEFAULT_GROUPS_SIZE;
-	char (*groups)[MAX_GROUP_NAME] = groupbuffer;
+    ACQUIRE_MBOX_LOCK(self);
+    if (self->disconnected) {
+        err_disconnected("receive");
+        goto error;
+    }
 
-	int bufsize = DEFAULT_BUFFER_SIZE;
-	char *pbuffer = databuffer;
+    for (;;) {
+        Py_BEGIN_ALLOW_THREADS
+        svc_type = 0;
+        size = SP_receive(self->mbox, &svc_type, senderbuffer, max_groups, &num_groups, groups, &msg_type, &endian, bufsize, pbuffer);
+        Py_END_ALLOW_THREADS
 
-	PyObject *sender = NULL, *data = NULL, *msg = NULL;
+        if (size >= 0) {
+            break;
+        }
+        if (size == BUFFER_TOO_SHORT) {
+            bufsize = -endian;
+            if (PyByteArray_Resize(data_byte_array, bufsize) < 0) {
+                goto error;
+            }
+            pbuffer = PyByteArray_AsString(data_byte_array);
+            continue;
+        }
+        if (size == GROUPS_TOO_SHORT) {
+            max_groups = -num_groups;
+            if (groups != groupbuffer)
+                free(groups);
+            groups = malloc(MAX_GROUP_NAME * max_groups);
+            if (groups == NULL) {
+                PyErr_NoMemory();
+                goto error;
+            }
+            continue;
+        }
+        spread_error(size, self);
+        goto error;
+    }
 
-	if (!PyArg_ParseTuple(args, ":receive"))
-		return NULL;
+    PyObject* result = NULL;
+    PyObject* sender_obj = NULL;
+    PyObject* group_obj = NULL;
+    PyObject* message_obj = NULL;
 
-	ACQUIRE_MBOX_LOCK(self);
-	if (self->disconnected) {
-		err_disconnected("receive");
-		goto error;
-	}
+    if (Is_regular_mess(svc_type)) {
+        sender_obj = PyUnicode_FromString(senderbuffer);
+        if (sender_obj == NULL) {
+            goto error;
+        }
+        message_obj = PyBytes_FromStringAndSize(pbuffer, size);
+        if (message_obj == NULL) {
+            Py_DECREF(sender_obj);
+            goto error;
+        }
+        result = new_regular_msg(sender_obj, num_groups, groups, msg_type, endian, message_obj);
+        Py_DECREF(sender_obj);
+        Py_DECREF(message_obj);
+    } else if (Is_membership_mess(svc_type)) {
+        result = new_membership_msg(svc_type, PyUnicode_FromString(senderbuffer), num_groups, groups, pbuffer, size);
+    } else {
+        PyErr_Format(SpreadError, "Unknown message type: %d", svc_type);
+        goto error;
+    }
 
-	for (;;) {
-		char *assertmsg = "internal error";
+    RELEASE_MBOX_LOCK(self);
+    if (groups != groupbuffer)
+        free(groups);
+    Py_XDECREF(data_byte_array);
+    return result;
 
-		Py_BEGIN_ALLOW_THREADS
-		svc_type = 0;	/* initializing this is critical */
-		size = SP_receive(self->mbox, &svc_type,
-				  senderbuffer,
-				  max_groups, &num_groups, groups,
-				  &msg_type, &endian,
-				  bufsize, pbuffer);
-		Py_END_ALLOW_THREADS
-
-		if (size >= 0) {
-			if (num_groups < 0) {
-				/* This isn't possible unless DROP_RECV is
-				 * passed to SP_receive in svc_type.
-				 */
-				assertmsg = "size >= 0 and num_groups < 0";
-				goto assert_error;
-			}
-			if (endian < 0) {
-				/* This should never be possible. */
-				assertmsg = "size >= 0 and endian < 0";
-				goto assert_error;
-			}
-			break;	/* This is the only normal loop exit. */
-		}
-		if (size == BUFFER_TOO_SHORT) {
-			if (endian >= 0) {
-				/* This isn't possible unless DROP_RECV is
-				 * passed to SP_receive in svc_type.
-				 */
-				assertmsg = "BUFFER_TOO_SHORT and endian >= 0";
-				goto assert_error;
-			}
-			bufsize = - endian;
-			Py_XDECREF(data);
-			data = PyString_FromStringAndSize(NULL, bufsize);
-			if (data == NULL)
-				goto error;
-			pbuffer = PyString_AS_STRING(data);
-			continue;
-		}
-		if (size == GROUPS_TOO_SHORT) {
-			/* If the data buffer and the group buffer are both
-			 * too small, and DROP_RECV was not specified, then
-			 * Jonathan Stanton said GROUPS_TOO_SHORT is returned.
-			 * If both are too short and DROP_RECV is specified,
-			 * then BUFFER_TOO_SHORT is returned.  "Backward
-			 * compatibility" headaches.  For simplicity, we only
-			 * deal with one "too short" condition per loop trip.
-			 * When we loop back, SP_receive should tell us
-			 * about the other (if another thread hasn't already
-			 * grabbed the msg).
-			 */
-			if (num_groups >= 0) {
-				/* This shouldn never be possible. */
-				assertmsg = "GROUPS_TOO_SHORT and num_groups >= 0";
-				goto assert_error;
-			}
-			max_groups = - num_groups;
-			if (groups != groupbuffer)
-				free(groups);
-			groups = malloc(MAX_GROUP_NAME * max_groups);
-			if (groups == NULL) {
-				PyErr_NoMemory();
-				goto error;
-			}
-			continue;
-		}
-		/* There's a real error we can't deal with (e.g., Spread
-		 * got disconnected).
-		 */
-		spread_error(size, self);
-		goto error;
-assert_error:
-		PyErr_Format(PyExc_AssertionError,
-			     "SP_receive: %s; "
-			     "size=%d svc_type=%d num_groups=%d "
-			     "msg_type=%d endian=%d",
-			     assertmsg,
-			     size, svc_type, num_groups, msg_type, endian);
-		goto error;
-	}
-
-	/* It's not clear from the SP_receive() man page what all the
-	   possible categories of services types are possible. */
-
-	sender = PyString_FromString(senderbuffer);
-	if (sender == NULL)
-		goto error;
-
-	if (Is_regular_mess(svc_type)) {
-		if (data == NULL) {
-			data = PyString_FromStringAndSize(databuffer, size);
-			if (data == NULL)
-				goto error;
-		}
-		else if (PyString_GET_SIZE(data) != size) {
-			if (_PyString_Resize(&data, size) < 0)
-				goto error;
-		}
-		msg = new_regular_msg(sender, num_groups, groups,
-				      msg_type, endian, data);
-	}
-	else if (Is_membership_mess(svc_type)) {
-		msg = new_membership_msg(svc_type, sender,
-					 num_groups, groups,
-					 pbuffer, size);
-	}
-	else {
-		PyErr_Format(SpreadError,
-			     "unexpected service type: 0x%x", svc_type);
-		goto error;
-	}
-
-  error:
-	RELEASE_MBOX_LOCK(self);
-	if (groups != groupbuffer)
-		free(groups);
-	Py_XDECREF(sender);
-	Py_XDECREF(data);
-	return msg;
+error:
+    RELEASE_MBOX_LOCK(self);
+    if (groups != groupbuffer)
+        free(groups);
+    Py_XDECREF(data_byte_array);
+    return NULL;
 }
 
 const int valid_svc_type = (UNRELIABLE_MESS | RELIABLE_MESS | FIFO_MESS
@@ -759,7 +739,7 @@ mailbox_multicast(MailboxObject *self, PyObject *args)
 	if (bytes < 0)
 		result = spread_error(bytes, self);
 	else
-		result = PyInt_FromLong(bytes);
+		result = PyLong_FromLong(bytes);
 Done:
 	RELEASE_MBOX_LOCK(self);
 	return result;
@@ -806,13 +786,13 @@ mailbox_multigroup_multicast(MailboxObject *self, PyObject *args)
 
 	for (index = 0; index < group_len; index++) {
 		temp = PyTuple_GetItem(group_tuple, index);
-		if(! PyString_Check(temp)) {
+		if(! PyUnicode_Check(temp)) {
 			PyErr_SetString(PyExc_TypeError,
 					"groups must be strings only");
 			goto Done;
 		}
 		strncpy(groups[index],
-			PyString_AsString(PyTuple_GetItem(group_tuple, index)),
+			PyUnicode_AsUTF8(PyTuple_GetItem(group_tuple, index)),
 			MAX_GROUP_NAME);
 	}
 
@@ -838,7 +818,7 @@ mailbox_multigroup_multicast(MailboxObject *self, PyObject *args)
 	if (bytes < 0)
 		result = spread_error(bytes, self);
 	else
-		result = PyInt_FromLong(bytes);
+		result = PyLong_FromLong(bytes);
 
 Done:
 	RELEASE_MBOX_LOCK(self);
@@ -865,7 +845,7 @@ mailbox_poll(MailboxObject *self, PyObject *args)
 	if (bytes < 0)
 		result = spread_error(bytes, self);
 	else
-		result = PyInt_FromLong(bytes);
+		result = PyLong_FromLong(bytes);
 Done:
 	RELEASE_MBOX_LOCK(self);
 	return result;
@@ -885,28 +865,29 @@ static PyMethodDef Mailbox_methods[] = {
 
 #define OFF(x) offsetof(MailboxObject, x)
 
-static struct memberlist Mailbox_memberlist[] = {
-	{"private_group",	T_OBJECT,	OFF(private_group)},
+static struct PyMemberDef Mailbox_memberlist[] = {
+	{"private_group",	T_OBJECT_EX,	OFF(private_group), READONLY},
 	{NULL}
 };
 
 static PyObject *
 mailbox_getattr(PyObject *self, char *name)
 {
-	PyObject *meth;
+    PyMethodDef *p;
 
-	meth = Py_FindMethod(Mailbox_methods, self, name);
-	if (meth)
-		return meth;
+    for (p = Mailbox_methods; p->ml_name != NULL; p++) {
+        if (strcmp(name, p->ml_name) == 0) {
+            return PyCFunction_New(p, self);
+        }
+    }
 	PyErr_Clear();
-	return PyMember_Get((char *)self, Mailbox_memberlist, name);
+	return PyMember_GetOne((char *)self, Mailbox_memberlist);
 }
 
 static PyTypeObject Mailbox_Type = {
 	/* The ob_type field must be initialized in the module init function
 	 * to be portable to Windows without using C++. */
-	PyObject_HEAD_INIT(NULL)
-	0,					/* ob_size */
+	PyVarObject_HEAD_INIT(NULL, 0)
 	"Mailbox",				/* tp_name */
 	sizeof(MailboxObject),			/* tp_basicsize */
 	0,					/* tp_itemsize */
@@ -975,13 +956,13 @@ spread_connect(PyObject *self, PyObject *args, PyObject* kwds)
 	}
 
 	/* initialize output buffer for group name */
-	group_name = PyString_FromStringAndSize(NULL, MAX_GROUP_NAME);
+	group_name = PyUnicode_New(MAX_GROUP_NAME, 0);
 	if (group_name == NULL)
 		return NULL;
 
 	Py_BEGIN_ALLOW_THREADS
 	ret = SP_connect(daemon, name, priority, membership, &_mbox,
-			 PyString_AS_STRING(group_name));
+			 (char *)PyUnicode_AsUTF8(group_name));
 	Py_END_ALLOW_THREADS
 
 	if (ret != ACCEPT_SESSION) {
@@ -1002,9 +983,9 @@ spread_connect(PyObject *self, PyObject *args, PyObject* kwds)
 		return NULL;
 	}
 #endif
-	if (_PyString_Resize(
+	if (PyUnicode_Resize(
 		&group_name,
-		strlen(PyString_AS_STRING(group_name))) < 0)
+		strlen(PyUnicode_AsUTF8(group_name))) < 0)
 	{
 		SP_disconnect(_mbox);
 		Py_DECREF(mbox);
@@ -1181,55 +1162,74 @@ static struct constdef {
 	{NULL}
 };
 
+static struct PyModuleDef spreadmodule = {
+    PyModuleDef_HEAD_INIT,
+    "spread",
+    NULL,
+    -1,
+    spread_methods
+};
+
 /* Initialization function for the module */
 
-DL_EXPORT(void)
-initspread(void)
+PyMODINIT_FUNC
+PyInit_spread(void)
 {
 	PyObject *m;
 	struct constdef *p;
 
 	/* Create the module and add the functions */
-	m = Py_InitModule("spread", spread_methods);
+	m = PyModule_Create(&spreadmodule);
 	if (m == NULL)
-		return;
+		return NULL;
 
 	/* Initialize the type of the new type object here; doing it here
 	 * is required for portability to Windows without requiring C++. */
-	Mailbox_Type.ob_type = &PyType_Type;
-	RegularMsg_Type.ob_type = &PyType_Type;
-	MembershipMsg_Type.ob_type = &PyType_Type;
+	if (PyType_Ready(&Mailbox_Type) < 0) {
+        return NULL;
+    }
+    if (PyType_Ready(&RegularMsg_Type) < 0) {
+        return NULL;
+    }
+    if (PyType_Ready(&MembershipMsg_Type) < 0) {
+        return NULL;
+    }
 
 	/* PyModule_AddObject() DECREFs its third argument */
 	Py_INCREF(&Mailbox_Type);
 	if (PyModule_AddObject(m, "MailboxType",
-			       (PyObject *)&Mailbox_Type) < 0)
-		return;
+			       (PyObject *)&Mailbox_Type) < 0) {
+		return NULL;
+    }
 	Py_INCREF(&RegularMsg_Type);
 	if (PyModule_AddObject(m, "RegularMsgType",
-			       (PyObject *)&RegularMsg_Type) < 0)
-		return;
+			       (PyObject *)&RegularMsg_Type) < 0) {
+		return NULL;
+    }
 	Py_INCREF(&MembershipMsg_Type);
 	if (PyModule_AddObject(m, "MembershipMsgType",
-			       (PyObject *)&MembershipMsg_Type) < 0)
-		return;
+			       (PyObject *)&MembershipMsg_Type) < 0) {
+		return NULL;
+    }
 
 	/* Create the exception, if necessary */
 	if (SpreadError == NULL) {
 		SpreadError = PyErr_NewException("spread.error", NULL, NULL);
 		if (SpreadError == NULL)
-			return;
+			return NULL;
 	}
 
 	/* Add the exception to the module */
 	Py_INCREF(SpreadError);
-	if (PyModule_AddObject(m, "error", SpreadError) < 0)
-		return;
+	if (PyModule_AddObject(m, "error", SpreadError) < 0) {
+		return NULL;
+    }
 
 	/* Add the Spread symbolic constants to the module */
 	for (p = spread_constants; p->name != NULL; p++) {
 		if (PyModule_AddIntConstant(m, p->name, p->value) < 0)
-			return;
+			return NULL;
 	}
 
+    return m;
 }

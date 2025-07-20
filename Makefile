@@ -15,24 +15,20 @@
 #     removes build artifacts
 
 # Set this to your favorite Python version.
-PYTHON=python2.7
-ALTPYTHON=python2.6
+# PYTHON=python2.7
+PYTHON=python3
 
 all:
 	$(PYTHON) setup.py -q build_ext
-	$(ALTPYTHON) setup.py -q build_ext
 
 install: all
 	$(PYTHON) setup.py install
-	$(ALTPYTHON) setup.py install
 
 test: all
 	$(PYTHON) testspread.py -v
-	$(ALTPYTHON) testspread.py -v
 
 clean:
 	$(PYTHON) setup.py clean -a
-	$(ALTPYTHON) setup.py clean -a
 	-rm -f *.o *.so
 	-rm -rf build
 	$(RM) *~

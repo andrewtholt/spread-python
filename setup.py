@@ -68,6 +68,7 @@ else:
                 include_dirs = [SPREAD_DIR + "/include"],
                 library_dirs = [SPREAD_DIR + "/lib"],
                 libraries = ['tspread-core'],
+                extra_compile_args = ['-g'],
                 )
 
 setup(name = "SpreadModule",
