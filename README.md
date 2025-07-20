@@ -17,3 +17,6 @@ My updates work for me. Feedback, patches, etc would be
 useful if you have any.
 
 -Gyepi Sam
+
+Small changes to make it work withe Python3 and spread 5.0.0
+
